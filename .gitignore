@@ -1,0 +1,54 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+tfplan
+crash.log
+crash.*.log
+# Note: .terraform.lock.hcl is intentionally NOT ignored — commit it to pin provider versions
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Spark / Delta local
+spark-warehouse/
+metastore_db/
+derby.log
+_SUCCESS
+*.crc
+
+# AWS credentials — NEVER commit
+.aws/
+aws-credentials*
+credentials
+
+# Raw sample data — too big and not source code
+Data/daily_csvs/
+# (Keep the original xlsx + products.csv + brief PDF in the repo — they're inputs the project expects.)
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Internal session files — not for the public repo
+CLAUDE.md
+docs/decisions.md
+docs/incident.md
