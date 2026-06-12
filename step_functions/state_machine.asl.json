@@ -1,0 +1,167 @@
+{
+  "Comment": "Lakehouse ingest: routes S3 object-created events under raw/ to the matching Glue job, then archives the file and refreshes the Glue catalog.",
+  "StartAt": "Route",
+  "States": {
+    "Route": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.detail.object.key",
+          "StringMatches": "raw/products/*",
+          "Next": "PrepareProducts"
+        },
+        {
+          "Variable": "$.detail.object.key",
+          "StringMatches": "raw/orders/*",
+          "Next": "PrepareOrders"
+        },
+        {
+          "Variable": "$.detail.object.key",
+          "StringMatches": "raw/order_items/*",
+          "Next": "PrepareOrderItems"
+        }
+      ],
+      "Default": "Ignore"
+    },
+
+    "Ignore": {
+      "Type": "Succeed",
+      "Comment": "Object landed under raw/ but not in a recognized dataset folder."
+    },
+
+    "PrepareProducts": {
+      "Type": "Pass",
+      "Parameters": {
+        "key.$": "$.detail.object.key",
+        "bucket.$": "$.detail.bucket.name",
+        "filename.$": "States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 2)",
+        "archiveKey.$": "States.Format('archive/products/{}', States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 2))",
+        "jobName": "${products_job}"
+      },
+      "Next": "RunGlueJob"
+    },
+
+    "PrepareOrders": {
+      "Type": "Pass",
+      "Parameters": {
+        "key.$": "$.detail.object.key",
+        "bucket.$": "$.detail.bucket.name",
+        "filename.$": "States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 2)",
+        "archiveKey.$": "States.Format('archive/orders/{}', States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 2))",
+        "jobName": "${orders_job}"
+      },
+      "Next": "RunGlueJob"
+    },
+
+    "PrepareOrderItems": {
+      "Type": "Pass",
+      "Parameters": {
+        "key.$": "$.detail.object.key",
+        "bucket.$": "$.detail.bucket.name",
+        "filename.$": "States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 2)",
+        "archiveKey.$": "States.Format('archive/order_items/{}', States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 2))",
+        "jobName": "${order_items_job}"
+      },
+      "Next": "RunGlueJob"
+    },
+
+    "RunGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName.$": "$.jobName",
+        "Arguments": {
+          "--source_key.$": "$.key",
+          "--bucket.$": "$.bucket"
+        }
+      },
+      "ResultPath": "$.glueResult",
+      "Next": "PostProcess",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ]
+    },
+
+    "PostProcess": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "StartCrawler",
+          "States": {
+            "StartCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+              "Parameters": { "Name": "${crawler_name}" },
+              "Catch": [
+                {
+                  "ErrorEquals": ["Glue.CrawlerRunningException"],
+                  "Next": "CrawlerAlreadyRunning"
+                }
+              ],
+              "End": true
+            },
+            "CrawlerAlreadyRunning": {
+              "Type": "Succeed",
+              "Comment": "Another execution already started the crawler; that's fine."
+            }
+          }
+        },
+        {
+          "StartAt": "ArchiveRaw",
+          "States": {
+            "ArchiveRaw": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:s3:copyObject",
+              "Parameters": {
+                "Bucket.$": "$.bucket",
+                "Key.$": "$.archiveKey",
+                "CopySource.$": "States.Format('{}/{}', $.bucket, $.key)"
+              },
+              "ResultPath": null,
+              "Next": "DeleteRaw"
+            },
+            "DeleteRaw": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:s3:deleteObject",
+              "Parameters": {
+                "Bucket.$": "$.bucket",
+                "Key.$": "$.key"
+              },
+              "ResultPath": null,
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": null,
+      "Next": "Done"
+    },
+
+    "MarkFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Parameters": {
+        "Bucket.$": "$.bucket",
+        "Key.$": "States.Format('quarantine/_failed/{}.json', $.key)",
+        "Body.$": "States.JsonToString($.error)",
+        "ContentType": "application/json"
+      },
+      "ResultPath": null,
+      "Next": "Fail"
+    },
+
+    "Fail": {
+      "Type": "Fail",
+      "Cause": "Glue job failed; failure marker written to quarantine/_failed/<key>.json",
+      "Error": "GlueJobFailed"
+    },
+
+    "Done": {
+      "Type": "Succeed"
+    }
+  }
+}

@@ -47,3 +47,28 @@ output "region" {
   description = "AWS region Terraform is deploying into."
   value       = local.region
 }
+
+output "state_machine_arn" {
+  description = "ARN of the lakehouse ingest Step Functions state machine."
+  value       = aws_sfn_state_machine.lakehouse.arn
+}
+
+output "state_machine_name" {
+  description = "Name of the lakehouse ingest Step Functions state machine."
+  value       = aws_sfn_state_machine.lakehouse.name
+}
+
+output "event_rule_name" {
+  description = "EventBridge rule that fans S3 object-created events into Step Functions."
+  value       = aws_cloudwatch_event_rule.raw_object_created.name
+}
+
+output "athena_workgroup" {
+  description = "Athena workgroup to use for analytical queries."
+  value       = aws_athena_workgroup.lakehouse.name
+}
+
+output "athena_results_location" {
+  description = "S3 location where Athena writes query results."
+  value       = "s3://${aws_s3_bucket.lakehouse.bucket}/athena-results/"
+}
