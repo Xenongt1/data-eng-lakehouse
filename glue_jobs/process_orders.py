@@ -74,12 +74,21 @@ def main() -> None:
     deduped = dedupe(valid, key="order_id", order_by="ingested_at")
     n_valid = deduped.count()
 
+    # Constrain the MERGE to the partitions actually present in this batch so
+    # concurrent MERGEs to other days don't trigger ConcurrentAppendException.
+    dates = [r.order_date for r in deduped.select("order_date").distinct().collect()]
+    partition_filter = None
+    if dates:
+        date_lits = ", ".join(f"date'{d}'" for d in dates)
+        partition_filter = f"t.order_date IN ({date_lits})"
+
     merge_into_delta(
         spark,
         deduped,
         table_path=f"{bucket_root}/processed/orders/",
         dedup_key="order_id",
         partition_by=["order_date"],
+        partition_filter=partition_filter,
     )
 
     print(

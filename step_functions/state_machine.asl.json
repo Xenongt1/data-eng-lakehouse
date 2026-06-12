@@ -76,6 +76,17 @@
         }
       },
       "ResultPath": "$.glueResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "Glue.AWSGlueException"
+          ],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 6,
+          "BackoffRate": 2.0
+        }
+      ],
       "Next": "PostProcess",
       "Catch": [
         {

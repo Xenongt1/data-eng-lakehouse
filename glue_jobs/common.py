@@ -94,18 +94,58 @@ def merge_into_delta(
     table_path: str,
     dedup_key: str,
     partition_by: Optional[List[str]] = None,
+    partition_filter: Optional[str] = None,
 ) -> None:
     """Upsert df into the Delta table at table_path. Creates the table on
-    first call with the given partitioning."""
+    first call with the given partitioning.
+
+    partition_filter, if given, is appended to the MERGE condition as
+    `AND (<filter>)`. Passing a target-partition predicate narrows the set of
+    files Delta has to consider, which prevents ConcurrentAppendException when
+    multiple jobs MERGE into disjoint partitions of the same table in parallel.
+    Use the `t.` alias for the target — e.g. `t.order_date IN (date'2025-04-01')`.
+    """
+    import random
+    import time
+
     if DeltaTable is not None and DeltaTable.isDeltaTable(spark, table_path):
-        target = DeltaTable.forPath(spark, table_path)
-        (
-            target.alias("t")
-            .merge(df.alias("s"), f"t.{dedup_key} = s.{dedup_key}")
-            .whenMatchedUpdateAll()
-            .whenNotMatchedInsertAll()
-            .execute()
-        )
+        merge_cond = f"t.{dedup_key} = s.{dedup_key}"
+        if partition_filter:
+            merge_cond = f"{merge_cond} AND ({partition_filter})"
+
+        # Belt-and-suspenders: even with partition predicates, the optimistic
+        # concurrency check can occasionally lose to a peer. Retry a few times
+        # with jittered exponential backoff before giving up.
+        last_err: Optional[Exception] = None
+        for attempt in range(5):
+            try:
+                target = DeltaTable.forPath(spark, table_path)
+                (
+                    target.alias("t")
+                    .merge(df.alias("s"), merge_cond)
+                    .whenMatchedUpdateAll()
+                    .whenNotMatchedInsertAll()
+                    .execute()
+                )
+                return
+            except Exception as e:  # pragma: no cover — exercised end-to-end only
+                msg = str(e)
+                if (
+                    "ConcurrentAppendException" in msg
+                    or "ConcurrentModificationException" in msg
+                    or "ConcurrentTransactionException" in msg
+                ):
+                    last_err = e
+                    backoff = (2 ** attempt) * 3 + random.random() * 5
+                    print(
+                        f"[merge] retry {attempt + 1}/5 after concurrent write: "
+                        f"{e.__class__.__name__}: sleeping {backoff:.1f}s"
+                    )
+                    time.sleep(backoff)
+                else:
+                    raise
+        if last_err:
+            raise last_err
     else:
         writer = df.write.format("delta").mode("overwrite")
         if partition_by:

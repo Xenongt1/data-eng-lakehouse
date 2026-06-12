@@ -44,7 +44,7 @@ resource "aws_glue_job" "jobs" {
   }
 
   execution_property {
-    max_concurrent_runs = 5
+    max_concurrent_runs = 15
   }
 
   depends_on = [

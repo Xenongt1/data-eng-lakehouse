@@ -33,6 +33,9 @@ from common import (
 )
 
 
+# Source CSV stores `reordered` as 0/1, not true/false. Spark's CSV reader
+# only parses literal true/false for BooleanType, so we read it as Int and
+# cast to Boolean post-read (Section 6 schema declares it BOOLEAN).
 ORDER_ITEMS_SCHEMA = T.StructType(
     [
         T.StructField("id", T.LongType(), True),
@@ -41,7 +44,7 @@ ORDER_ITEMS_SCHEMA = T.StructType(
         T.StructField("days_since_prior_order", T.IntegerType(), True),
         T.StructField("product_id", T.IntegerType(), True),
         T.StructField("add_to_cart_order", T.IntegerType(), True),
-        T.StructField("reordered", T.BooleanType(), True),
+        T.StructField("reordered", T.IntegerType(), True),
         T.StructField("order_timestamp", T.TimestampType(), True),
         T.StructField("date", T.DateType(), True),
     ]
@@ -63,6 +66,7 @@ def main() -> None:
     raw = (
         read_csv(spark, source_path, ORDER_ITEMS_SCHEMA)
         .withColumnRenamed("date", "order_date")
+        .withColumn("reordered", (F.col("reordered") != 0).cast("boolean"))
         .withColumn("ingested_at", F.current_timestamp())
     )
     n_read = raw.count()
@@ -102,26 +106,20 @@ def main() -> None:
         spark.read.format("delta").load(products_path).select("product_id").distinct()
     )
 
-    v = structural_valid.alias("v")
-    ko = known_orders.alias("ko")
-    kp = known_products.alias("kp")
-
-    bad_order = v.join(
-        ko, F.col("v.order_id") == F.col("ko.order_id"), "leftanti"
+    # Using single-column-name joins so the join key is deduplicated in the
+    # result — keeps F.col("product_id") / F.col("order_id") unambiguous in
+    # downstream selects.
+    bad_order = structural_valid.join(
+        known_orders, "order_id", "leftanti"
     ).withColumn("rejection_reason", F.lit("unknown_order_id"))
 
-    survives_order = v.join(
-        ko, F.col("v.order_id") == F.col("ko.order_id"), "leftsemi"
-    )
+    survives_order = structural_valid.join(known_orders, "order_id", "leftsemi")
 
-    go = survives_order.alias("go")
-    bad_product = go.join(
-        kp, F.col("go.product_id") == F.col("kp.product_id"), "leftanti"
+    bad_product = survives_order.join(
+        known_products, "product_id", "leftanti"
     ).withColumn("rejection_reason", F.lit("unknown_product_id"))
 
-    valid_final = survives_order.join(
-        kp, F.col("product_id") == F.col("kp.product_id"), "leftsemi"
-    )
+    valid_final = survives_order.join(known_products, "product_id", "leftsemi")
 
     ref_rejected = bad_order.unionByName(bad_product)
     all_rejected = structural_rejected.unionByName(
@@ -133,12 +131,22 @@ def main() -> None:
     deduped = dedupe(valid_final, key="id", order_by="ingested_at")
     n_valid = deduped.count()
 
+    # Same partition-narrowing trick as process_orders: tell Delta exactly which
+    # order_date partitions this batch touches so concurrent MERGEs into other
+    # days don't conflict.
+    dates = [r.order_date for r in deduped.select("order_date").distinct().collect()]
+    partition_filter = None
+    if dates:
+        date_lits = ", ".join(f"date'{d}'" for d in dates)
+        partition_filter = f"t.order_date IN ({date_lits})"
+
     merge_into_delta(
         spark,
         deduped,
         table_path=f"{bucket_root}/processed/order_items/",
         dedup_key="id",
         partition_by=["order_date"],
+        partition_filter=partition_filter,
     )
 
     print(
