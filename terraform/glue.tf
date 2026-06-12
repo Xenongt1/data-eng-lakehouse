@@ -36,6 +36,8 @@ resource "aws_glue_job" "jobs" {
     "--job-bookmark-option"              = "job-bookmark-disable"
     "--TempDir"                          = "s3://${aws_s3_bucket.lakehouse.bucket}/temp/"
     "--bucket"                           = aws_s3_bucket.lakehouse.bucket
+    # Make common.py importable from the per-dataset job script.
+    "--extra-py-files" = "s3://${aws_s3_bucket.lakehouse.bucket}/scripts/common.py"
     # source_key is supplied at run time by Step Functions; placeholder lets
     # the job start manually for smoke tests.
     "--source_key" = ""
@@ -56,19 +58,22 @@ resource "aws_glue_crawler" "lakehouse" {
   role          = aws_iam_role.glue.arn
   database_name = aws_glue_catalog_database.lakehouse_dwh.name
 
-  s3_target {
-    path = "s3://${aws_s3_bucket.lakehouse.bucket}/processed/"
+  # A plain S3 target treats each _delta_log/ folder and parquet file as its
+  # own table. delta_target with create_native_delta_table=true tells the
+  # crawler to register native Delta tables that Athena engine v3 queries
+  # directly — no symlink manifests needed.
+  delta_target {
+    delta_tables = [
+      "s3://${aws_s3_bucket.lakehouse.bucket}/processed/products/",
+      "s3://${aws_s3_bucket.lakehouse.bucket}/processed/orders/",
+      "s3://${aws_s3_bucket.lakehouse.bucket}/processed/order_items/",
+    ]
+    create_native_delta_table = true
+    write_manifest            = false
   }
 
   schema_change_policy {
     delete_behavior = "LOG"
     update_behavior = "UPDATE_IN_DATABASE"
   }
-
-  configuration = jsonencode({
-    Version = 1.0
-    Grouping = {
-      TableGroupingPolicy = "CombineCompatibleSchemas"
-    }
-  })
 }
